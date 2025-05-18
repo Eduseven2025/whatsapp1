@@ -1,54 +1,68 @@
 const express = require('express');
-const { create } = require('venom-bot');
-const fs = require('fs');
-const path = require('path');
+const qrcode = require('qrcode');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+
 const app = express();
-const PORT = process.env.PORT || 8080;
+const port = process.env.PORT || 8080;
+
+app.use(express.json());
 
 const sessions = {};
 
-app.get('/qr/:sessionId', async (req, res) => {
-  const sessionId = req.params.sessionId;
+app.get('/qr/:id', async (req, res) => {
+  const id = req.params.id;
 
-  if (sessions[sessionId] && sessions[sessionId].ready) {
-    return res.json({ status: 'ready', message: 'Sessão já está conectada.' });
+  if (sessions[id] && sessions[id].ready) {
+    return res.json({ status: 'ready', message: 'Sessão já conectada.' });
   }
 
-  if (!sessions[sessionId]) {
-    sessions[sessionId] = { ready: false, qr: null };
-
-    create({
-      session: sessionId,
-      headless: true,
-      useChrome: true,
-      disableSpins: true,
-      browserArgs: ['--no-sandbox', '--disable-setuid-sandbox']
-    })
-    .then((client) => {
-      sessions[sessionId].ready = true;
-      sessions[sessionId].client = client;
-      console.log(`✅ Sessão ${sessionId} conectada.`);
-    })
-    .catch((error) => {
-      console.error(`❌ Erro ao iniciar sessão ${sessionId}:`, error);
+  if (!sessions[id]) {
+    const client = new Client({
+      authStrategy: new LocalAuth({ clientId: id }),
+      puppeteer: { headless: true, args: ['--no-sandbox'] }
     });
+
+    sessions[id] = { client, qr: null, ready: false };
+
+    client.on('qr', (qr) => {
+      qrcode.toDataURL(qr).then((base64) => {
+        sessions[id].qr = base64;
+      });
+    });
+
+    client.on('ready', () => {
+      sessions[id].ready = true;
+      console.log(`✅ Sessão ${id} conectada.`);
+    });
+
+    client.on('disconnected', () => {
+      console.log(`❌ Sessão ${id} desconectada.`);
+      delete sessions[id];
+    });
+
+    client.initialize();
   }
 
-  let tentativas = 0;
-  const intervalo = setInterval(() => {
-    tentativas++;
-    const qrPath = path.resolve(`tokens/${sessionId}/Default/qr-code.png`);
-    if (fs.existsSync(qrPath)) {
-      clearInterval(intervalo);
-      const image = fs.readFileSync(qrPath, { encoding: 'base64' });
-      res.json({ status: 'success', qr: image });
-    } else if (tentativas > 15) {
-      clearInterval(intervalo);
-      res.json({ status: 'pending', message: 'QR code ainda não disponível, aguarde...' });
+  let attempts = 0;
+  const interval = setInterval(() => {
+    attempts++;
+    if (sessions[id].qr) {
+      clearInterval(interval);
+      return res.json({ status: 'success', qr: sessions[id].qr });
+    }
+
+    if (attempts >= 15) {
+      clearInterval(interval);
+      return res.json({ status: 'pending', message: 'QR ainda não disponível. Tente novamente.' });
     }
   }, 1000);
 });
 
-app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
+app.get('/', (req, res) => {
+  res.send('Servidor WhatsSeven rodando ✅');
 });
+
+app.listen(port, () => {
+  console.log(`🟢 Servidor rodando na porta ${port}`);
+});
+
