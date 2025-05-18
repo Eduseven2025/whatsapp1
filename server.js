@@ -1,68 +1,91 @@
 const express = require('express');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const SESSION_PATH = process.env.SESSION_PATH || './sessions';
+const port = process.env.PORT || 8080;
 
 app.use(express.json());
 
+// Guardar clientes por identificador
 const clients = {};
 
-const createClient = async (sessionId) => {
-    const sessionDir = path.join(SESSION_PATH, sessionId);
-    fs.mkdirSync(sessionDir, { recursive: true });
-
+// Cria ou retorna cliente existente
+function getClient(id) {
+  if (!clients[id]) {
     const client = new Client({
-        authStrategy: new LocalAuth({ dataPath: sessionDir }),
-        puppeteer: { headless: true, args: ['--no-sandbox'] }
-    });
-
-    clients[sessionId] = { client, ready: false };
-
-    client.on('qr', async (qr) => {
-        const qrImage = await qrcode.toDataURL(qr);
-        clients[sessionId].qr = qrImage;
-    });
-
-    client.on('ready', () => {
-        clients[sessionId].ready = true;
+      authStrategy: new LocalAuth({ clientId: id }),
+      puppeteer: { headless: true }
     });
 
     client.initialize();
-};
 
-app.get('/qr/:sessionId', async (req, res) => {
-    const { sessionId } = req.params;
-    if (!clients[sessionId]) await createClient(sessionId);
-    setTimeout(() => {
-        res.send(clients[sessionId].qr || 'Aguardando QR...');
-    }, 3000);
+    client.on('qr', (qr) => {
+      clients[id].qr = qr;
+    });
+
+    client.on('ready', () => {
+      clients[id].ready = true;
+      console.log(`Cliente ${id} pronto!`);
+    });
+
+    client.on('auth_failure', () => {
+      console.log(`Falha na autenticação do cliente ${id}`);
+      clients[id].ready = false;
+    });
+
+    client.on('disconnected', () => {
+      console.log(`Cliente ${id} desconectado`);
+      clients[id].ready = false;
+      client.destroy();
+      client.initialize();
+    });
+
+    clients[id] = { client, qr: null, ready: false };
+  }
+  return clients[id];
+}
+
+// Endpoint para gerar QRCode para um admin
+app.get('/qr/:id', async (req, res) => {
+  const id = req.params.id;
+  const c = getClient(id);
+
+  if (!c.qr) {
+    return res.json({ status: 'pending', message: 'QR code ainda não disponível, aguarde...' });
+  }
+
+  try {
+    const qrImage = await qrcode.toDataURL(c.qr);
+    res.json({ status: 'success', qr: qrImage });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
 });
 
-app.get('/status/:sessionId', (req, res) => {
-    const { sessionId } = req.params;
-    const status = clients[sessionId]?.ready ? 'CONNECTED' : 'NOT_CONNECTED';
-    res.send({ status });
+// Endpoint para enviar mensagem
+app.post('/send/:id', async (req, res) => {
+  const id = req.params.id;
+  const { number, message } = req.body;
+
+  if (!number || !message) {
+    return res.status(400).json({ status: 'error', error: 'Número e mensagem são obrigatórios' });
+  }
+
+  const c = getClient(id);
+  if (!c.ready) {
+    return res.status(400).json({ status: 'error', error: 'Cliente não está pronto' });
+  }
+
+  try {
+    const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
+    await c.client.sendMessage(chatId, message);
+    res.json({ status: 'success', message: 'Mensagem enviada' });
+  } catch (err) {
+    res.status(500).json({ status: 'error', error: err.message });
+  }
 });
 
-app.post('/send/:sessionId', async (req, res) => {
-    const { sessionId } = req.params;
-    const { number, message } = req.body;
-    if (!clients[sessionId] || !clients[sessionId].ready) {
-        return res.status(400).send({ error: 'Sessão não conectada' });
-    }
-    try {
-        await clients[sessionId].client.sendMessage(number + '@c.us', message);
-        res.send({ success: true });
-    } catch (err) {
-        res.status(500).send({ error: err.message });
-    }
-});
-
-app.listen(PORT, () => {
-    console.log('Servidor rodando na porta ' + PORT);
+app.listen(port, () => {
+  console.log(`Servidor rodando na porta ${port}`);
 });
